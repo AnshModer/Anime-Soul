@@ -1,7 +1,10 @@
 {
-  "name": "Copy of Copy of AnimeSoul - Live Character Chat",
+  "name": "AnimeSoul - Live Character Chat",
   "description": "Immersive real-time conversations with your favorite anime characters in English, Hindi, and Hinglish using Gemini Live API.",
   "requestFramePermissions": [
     "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
 }

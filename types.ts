@@ -2,10 +2,12 @@ export interface Character {
   id: string;
   name: string;
   anime: string;
+  category?: 'Naruto' | 'Demon Slayer' | 'Other Anime';
+  group?: string;
   description: string;
   systemInstruction: string;
   themeColor: string;
-  avatarUrl: string; // Using picsum for placeholder
+  avatarUrl: string;
 }
 
 export interface Message {

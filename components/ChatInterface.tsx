@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { GoogleGenAI, Chat, GenerateContentResponse } from '@google/genai';
 import { Character, Message } from '../types';
 import { Send, Phone, ArrowLeft, Loader2, Sparkles } from 'lucide-react';
 
@@ -13,20 +12,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ character, onBack, onStar
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const chatSessionRef = useRef<Chat | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // Reset chat when character changes
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    chatSessionRef.current = ai.chats.create({
-      model: 'gemini-2.5-flash',
-      config: {
-        systemInstruction: character.systemInstruction,
-      },
-    });
-    
-    // Initial greeting
+    // Initial greeting when character changes
     setMessages([
       {
         id: 'init',
@@ -42,50 +31,107 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ character, onBack, onStar
   }, [messages]);
 
   const handleSend = async () => {
-    if (!input.trim() || !chatSessionRef.current || isLoading) return;
+    if (!input.trim() || isLoading) return;
 
+    const userText = input.trim();
     const userMsg: Message = {
       id: Date.now().toString(),
       role: 'user',
-      text: input,
+      text: userText,
       timestamp: new Date()
     };
 
-    setMessages(prev => [...prev, userMsg]);
+    const currentHistory = [...messages, userMsg];
+    setMessages(currentHistory);
     setInput('');
     setIsLoading(true);
 
-    try {
-      const resultStream = await chatSessionRef.current.sendMessageStream({ message: userMsg.text });
-      
-      let fullResponseText = '';
-      const responseMsgId = (Date.now() + 1).toString();
-      
-      // Add placeholder for streaming response
-      setMessages(prev => [...prev, {
+    const responseMsgId = (Date.now() + 1).toString();
+    setMessages(prev => [
+      ...prev,
+      {
         id: responseMsgId,
         role: 'model',
         text: '',
         timestamp: new Date()
-      }]);
-
-      for await (const chunk of resultStream) {
-        const c = chunk as GenerateContentResponse;
-        const textChunk = c.text || '';
-        fullResponseText += textChunk;
-        
-        setMessages(prev => prev.map(msg => 
-          msg.id === responseMsgId ? { ...msg, text: fullResponseText } : msg
-        ));
       }
-    } catch (error) {
+    ]);
+
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: userText,
+          history: currentHistory.map(m => ({ role: m.role, text: m.text })),
+          systemInstruction: character.systemInstruction,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `Server responded with ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let fullResponseText = '';
+
+      if (reader) {
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith('data: ')) {
+              const dataStr = trimmed.slice(6);
+              if (dataStr === '[DONE]') continue;
+
+              try {
+                const parsed = JSON.parse(dataStr);
+                if (parsed.text) {
+                  fullResponseText += parsed.text;
+                  setMessages(prev =>
+                    prev.map(msg =>
+                      msg.id === responseMsgId ? { ...msg, text: fullResponseText } : msg
+                    )
+                  );
+                } else if (parsed.error) {
+                  throw new Error(parsed.error);
+                }
+              } catch (e) {
+                // Ignore json parse error for partial lines
+              }
+            }
+          }
+        }
+      }
+    } catch (error: any) {
       console.error('Chat error:', error);
-      setMessages(prev => [...prev, {
-        id: Date.now().toString(),
-        role: 'model',
-        text: '(Connection interrupted... seems like the network chakra is blocked.)',
-        timestamp: new Date()
-      }]);
+      const isHighDemand =
+        error?.message?.includes('high demand') ||
+        error?.message?.includes('503') ||
+        error?.message?.includes('UNAVAILABLE');
+      const errorFeedback = isHighDemand
+        ? '(Chakra overload from high demand! Please tap Send again to reconnect.)'
+        : error?.message || '(Connection interrupted... please try again.)';
+
+      setMessages(prev =>
+        prev.map(msg =>
+          msg.id === responseMsgId
+            ? {
+                ...msg,
+                text: msg.text ? msg.text + ' ' + errorFeedback : errorFeedback,
+              }
+            : msg
+        )
+      );
     } finally {
       setIsLoading(false);
     }
@@ -111,17 +157,26 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ character, onBack, onStar
              <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-gray-900"></div>
           </div>
           <div>
-            <h2 className="font-bold text-white leading-tight">{character.name}</h2>
-            <p className="text-xs text-gray-400 truncate max-w-[150px]">{character.anime}</p>
+            <div className="flex items-center gap-2">
+              <h2 className="font-bold text-white text-base md:text-lg leading-tight">{character.name}</h2>
+              {character.group && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-yellow-400/10 text-yellow-400 border border-yellow-400/30 hidden sm:inline-block font-medium">
+                  {character.group}
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-gray-400 truncate max-w-[260px] md:max-w-[420px]">
+              {character.anime} • {character.description}
+            </p>
           </div>
         </div>
         
         <button 
           onClick={onStartCall}
-          className={`flex items-center space-x-2 px-4 py-2 bg-gradient-to-r from-${character.themeColor}-600 to-${character.themeColor}-500 hover:from-${character.themeColor}-500 hover:to-${character.themeColor}-400 text-white rounded-full text-sm font-medium transition-all shadow-lg shadow-${character.themeColor}-500/20`}
+          className="flex items-center space-x-2 px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-white rounded-full text-xs md:text-sm font-semibold transition-all shadow-lg shadow-emerald-500/25 active:scale-95"
         >
-          <Phone size={16} />
-          <span>Call</span>
+          <Phone size={15} />
+          <span>Live Call</span>
         </button>
       </div>
 
@@ -133,10 +188,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ character, onBack, onStar
             className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
           >
             <div 
-              className={`max-w-[80%] md:max-w-[70%] rounded-2xl px-4 py-3 text-sm md:text-base leading-relaxed ${
+              className={`max-w-[85%] md:max-w-[70%] rounded-2xl px-4 py-3 text-sm md:text-base leading-relaxed ${
                 msg.role === 'user' 
-                  ? `bg-${character.themeColor}-600 text-white rounded-br-none` 
-                  : 'bg-gray-800 text-gray-100 rounded-bl-none border border-gray-700'
+                  ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-br-none shadow-md' 
+                  : 'bg-gray-800/95 text-gray-100 rounded-bl-none border border-gray-700/80 shadow-sm'
               }`}
             >
               {msg.text || <span className="animate-pulse">...</span>}
@@ -170,8 +225,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({ character, onBack, onStar
           </button>
         </div>
         <div className="text-center mt-2">
-            <p className="text-[10px] text-gray-600 flex items-center justify-center gap-1">
-                <Sparkles size={10} /> Powered by Gemini 2.5 Flash
+            <p className="text-[10px] text-gray-500 flex items-center justify-center gap-1">
+                <Sparkles size={10} /> Powered by Gemini Flash-Lite • Fast & Quota-Optimized
             </p>
         </div>
       </div>
